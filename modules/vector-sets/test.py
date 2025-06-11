@@ -167,31 +167,106 @@ class TestCase:
         """"Each test class should override this if it takes a significant amount of time to run. Default is 100ms"""
         return 0.1
 
-def find_test_classes(primary_port, replica_port):
+def find_test_classes(primary_port, replica_port, specific_files=None):
     test_classes = []
     tests_dir = 'tests'
 
     if not os.path.exists(tests_dir):
         return []
 
-    for file in os.listdir(tests_dir):
-        if file.endswith('.py'):
-            module_name = f"tests.{file[:-3]}"
-            try:
-                module = importlib.import_module(module_name)
-                for name, obj in inspect.getmembers(module):
-                    if inspect.isclass(obj) and obj.__name__ != 'TestCase' and hasattr(obj, 'test'):
-                        # Create test instance with specified ports
-                        test_instance = obj()
-                        test_instance.redis = redis.Redis(port=primary_port)
-                        test_instance.replica = redis.Redis(port=replica_port)
-                        test_instance.primary_port = primary_port
-                        test_instance.replica_port = replica_port
-                        test_classes.append(test_instance)
-            except Exception as e:
-                print(f"Error loading {file}: {e}")
+    # Get list of files to process
+    if specific_files:
+        # Process only specified files
+        files_to_process = []
+        for file_spec in specific_files:
+            # Handle different input formats
+            if file_spec.endswith('.py'):
+                filename = file_spec
+            elif '/' in file_spec or '\\' in file_spec:
+                # Extract filename from path
+                filename = os.path.basename(file_spec)
+                if not filename.endswith('.py'):
+                    filename += '.py'
+            else:
+                # Assume it's just the module name
+                filename = file_spec + '.py'
+
+            # Check if file exists
+            file_path = os.path.join(tests_dir, filename)
+            if os.path.exists(file_path):
+                files_to_process.append(filename)
+            else:
+                print(colored(f"WARNING: Test file '{filename}' not found in {tests_dir}/", "yellow"))
+    else:
+        # Process all .py files in tests directory
+        files_to_process = [f for f in os.listdir(tests_dir) if f.endswith('.py')]
+
+    for file in files_to_process:
+        module_name = f"tests.{file[:-3]}"
+        try:
+            module = importlib.import_module(module_name)
+            for name, obj in inspect.getmembers(module):
+                if inspect.isclass(obj) and obj.__name__ != 'TestCase' and hasattr(obj, 'test'):
+                    # Create test instance with specified ports
+                    test_instance = obj()
+                    test_instance.redis = redis.Redis(port=primary_port)
+                    test_instance.replica = redis.Redis(port=replica_port)
+                    test_instance.primary_port = primary_port
+                    test_instance.replica_port = replica_port
+                    test_classes.append(test_instance)
+        except Exception as e:
+            print(f"Error loading {file}: {e}")
 
     return test_classes
+
+def list_available_tests():
+    """List all available test files"""
+    tests_dir = 'tests'
+
+    if not os.path.exists(tests_dir):
+        print("No tests directory found!")
+        return
+
+    print("Available test files:")
+    print("=" * 50)
+
+    test_files = []
+    for file in os.listdir(tests_dir):
+        if file.endswith('.py'):
+            test_files.append(file)
+
+    if not test_files:
+        print("No test files found!")
+        return
+
+    # Sort files alphabetically
+    test_files.sort()
+
+    for file in test_files:
+        module_name = f"tests.{file[:-3]}"
+        try:
+            module = importlib.import_module(module_name)
+            test_classes = []
+            for name, obj in inspect.getmembers(module):
+                if inspect.isclass(obj) and obj.__name__ != 'TestCase' and hasattr(obj, 'test'):
+                    test_classes.append(obj)
+
+            if test_classes:
+                # Get test name from the first test class
+                test_instance = test_classes[0]()
+                test_name = test_instance.getname() if hasattr(test_instance, 'getname') else test_classes[0].__name__
+                runtime = test_instance.estimated_runtime() if hasattr(test_instance, 'estimated_runtime') else 0.1
+                print(f"  {file:<25} - {test_name} ({runtime:.1f}s)")
+            else:
+                print(f"  {file:<25} - No test classes found")
+        except Exception as e:
+            print(f"  {file:<25} - Error loading: {e}")
+
+    print("\nUsage examples:")
+    print("  python test.py --test threads_config")
+    print("  python test.py --test basic_commands.py")
+    print("  python test.py --test threads_config vadd_cas")
+    print("  python test.py -t threads_config")
 
 def check_redis_empty(r, instance_name):
     """Check if Redis instance is empty"""
@@ -221,14 +296,34 @@ def run_tests():
     parser = argparse.ArgumentParser(description='Run Redis vector tests.')
     parser.add_argument('--primary-port', type=int, default=6379, help='Primary Redis instance port (default: 6379)')
     parser.add_argument('--replica-port', type=int, default=6380, help='Replica Redis instance port (default: 6380)')
+    parser.add_argument('--test', '-t', nargs='*', help='Run specific test file(s). Can specify filename with or without .py extension, or module name. Examples: --test threads_config, --test basic_commands.py, --test tests/vadd_cas.py')
+    parser.add_argument('--list', '-l', action='store_true', help='List all available test files and exit')
     args = parser.parse_args()
 
-    print("================================================")
-    print(f"Make sure to have Redis running on localhost")
-    print(f"Primary port: {args.primary_port}")
-    print(f"Replica port: {args.replica_port}")
-    print("with --enable-debug-command yes")
-    print("================================================\n")
+    # Handle --list option
+    if args.list:
+        list_available_tests()
+        return
+
+    # Determine which tests to run
+    if args.test is not None:
+        if len(args.test) == 0:
+            print("Error: --test option requires at least one test file name.")
+            print("Use --list to see available tests.")
+            return
+        print("================================================")
+        print(f"Running specific test(s): {', '.join(args.test)}")
+        print(f"Primary port: {args.primary_port}")
+        print(f"Replica port: {args.replica_port}")
+        print("================================================\n")
+    else:
+        print("================================================")
+        print(f"Running ALL tests")
+        print(f"Make sure to have Redis running on localhost")
+        print(f"Primary port: {args.primary_port}")
+        print(f"Replica port: {args.replica_port}")
+        print("with --enable-debug-command yes")
+        print("================================================\n")
 
     # Check if Redis instances are empty
     primary = redis.Redis(port=args.primary_port)
@@ -241,9 +336,13 @@ def run_tests():
     if replica_running:
         check_redis_empty(replica, "Replica")
 
-    tests = find_test_classes(args.primary_port, args.replica_port)
+    tests = find_test_classes(args.primary_port, args.replica_port, args.test)
     if not tests:
-        print("No tests found!")
+        if args.test:
+            print("No tests found matching the specified files!")
+            print("Use --list to see available tests.")
+        else:
+            print("No tests found!")
         return
 
     # Sort tests by estimated runtime
